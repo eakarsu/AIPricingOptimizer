@@ -1,0 +1,75 @@
+
+i1. Start the Application
+
+  cd /Users/erolakarsu/projects/AIPricingOptimizer
+  ./start.sh
+
+  Then open http://localhost:3000
+
+  2. Login
+
+  - Click "Use Demo Credentials" button (fills email/password)
+  - Click "Sign In"
+
+  3. Testing Each Feature
+
+  AI Competitor Price Tracker (/competitor-tracking)
+
+  1. Click "Competitor Tracker" in sidebar (or card on Dashboard)
+  2. View data: See table with 16 seeded records
+  3. Row click: Click any row → Detail modal opens
+  4. AI Analysis: In modal, click "Generate AI Analysis" button
+  5. Edit: Click "Edit" button in modal
+  6. Delete: Click "Delete" button in modal
+  7. New item: Click "+ New Tracking" button at top
+
+  AI Demand Forecaster (/demand-forecasts)
+
+  1. Click "Demand Forecaster" in sidebar
+  2. Generate AI Forecast:
+    - Select a product from dropdown
+    - Click "Generate Forecast" button
+  3. View: Click any row to see details + AI analysis
+  4. Edit/Delete: Buttons in detail modal
+  5. New item: Click "+ New Forecast" button
+
+  AI Bundle Recommender (/bundle-recommendations)
+
+  1. Click "Bundle Recommender" in sidebar
+  2. Generate AI Bundles: Click "AI Generate Bundles" button (green)
+  3. View: Click any row to see bundle details
+  4. Activate: Click "Activate Bundle" button in modal
+  5. Edit/Delete: Buttons in detail modal
+  6. New item: Click "+ New Bundle" button
+
+  AI Discount Optimizer (/discount-optimizations)
+
+  1. Click "Discount Optimizer" in sidebar
+  2. Generate AI Optimization:
+    - Select a product from dropdown
+    - Click "Calculate Optimal Discount" button
+  3. View: Click any row to see discount analysis
+  4. Edit/Delete: Buttons in detail modal
+  5. New item: Click "+ New Optimization" button
+
+  AI Price Elasticity Analyzer (/price-elasticity)
+
+  1. Click "Price Elasticity" in sidebar
+  2. Analyze Elasticity:
+    - Select a product from dropdown
+    - Click "Analyze Elasticity" button
+  3. View: Click any row to see elasticity details + AI recommendations
+  4. Edit/Delete: Buttons in detail modal
+  5. New item: Click "+ New Analysis" button
+
+  Quick Test Flow
+
+  1. Login → Dashboard
+  2. Click "AI Demand Forecaster" card
+  3. Select "Wireless Bluetooth Headphones" from dropdown
+  4. Click "Generate Forecast"
+  5. Wait for AI response (shows structured analysis)
+  6. Click row to see full details
+  7. Test Edit/Delete buttons
+
+  The AI buttons will call OpenRouter API and display results in a professional formatted view (not raw JSON).

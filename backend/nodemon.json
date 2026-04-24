@@ -1,0 +1,10 @@
+{
+  "watch": ["server.js", "seed.js", ".env"],
+  "ext": "js,json",
+  "ignore": ["node_modules"],
+  "delay": "500",
+  "verbose": true,
+  "events": {
+    "restart": "echo '\\n\\033[0;33m[NODEMON] Backend restarted due to file changes!\\033[0m\\n'"
+  }
+}
