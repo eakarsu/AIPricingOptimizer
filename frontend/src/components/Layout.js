@@ -45,6 +45,8 @@ const Layout = ({ children }) => {
     { path: '/security-headers', label: 'Security Headers', icon: '🔒', isNew: true },
     { path: '/email-verifications', label: 'Email Verifications', icon: '📧', isNew: true },
     { path: '/password-validations', label: 'Password Validations', icon: '✅', isNew: true },
+    { divider: true, label: 'Pricing Views' },
+    { path: '/custom-views', label: 'Pricing Views', icon: '💹', isNew: true },
     { divider: true },
     { path: '/users', label: 'User Management', icon: '👥' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },

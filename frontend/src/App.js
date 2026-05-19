@@ -53,6 +53,7 @@ import GapNoWebhooksForPricePage from './pages/GapNoWebhooksForPricePage';
 import GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage from './pages/GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage';
 import GapNoNotificationsModulePage from './pages/GapNoNotificationsModulePage';
 import GapNoAuditLoggingDedicatedModuleDespiteSessionPage from './pages/GapNoAuditLoggingDedicatedModuleDespiteSessionPage';
+import CustomViewsPage from './pages/CustomViewsPage';
 const PrivateRoute = ({ children }) => {
   const { isAuthenticated, loading } = useAuth();
 
@@ -117,6 +118,7 @@ function AppRoutes() {
           <Route path="/gap-limited-integrations-no-shopify-amazon-ebay-adapte" element={<GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage />} />
           <Route path="/gap-no-notifications-module" element={<GapNoNotificationsModulePage />} />
           <Route path="/gap-no-audit-logging-dedicated-module-despite-session-" element={<GapNoAuditLoggingDedicatedModuleDespiteSessionPage />} />
+          <Route path="/custom-views" element={<PrivateRoute><CustomViewsPage /></PrivateRoute>} />
         </Routes>
   );
 }

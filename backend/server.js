@@ -6,6 +6,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+let _ipKeyGen;
+try { ({ ipKeyGenerator: _ipKeyGen } = require('express-rate-limit')); } catch (_) { _ipKeyGen = (req) => (req.ip || 'unknown'); }
 const crypto = require('crypto');
 
 // Validate required environment variables at startup
@@ -52,9 +54,9 @@ const aiRateLimiter = rateLimit({
   message: { error: 'AI rate limit exceeded. Maximum 20 AI calls per hour. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Use user ID if authenticated, else IP
-    return req.user ? `user_${req.user.id}` : req.ip;
+  keyGenerator: (req, res) => {
+    // Use user ID if authenticated, else IPv6-safe ip key
+    return req.user ? `user_${req.user.id}` : (typeof _ipKeyGen === 'function' ? _ipKeyGen(req, res) : (req.ip || 'unknown'));
   },
   handler: async (req, res) => {
     // Log rate limit hit to DB
@@ -4395,15 +4397,9 @@ app.use('/api/gap-limited-integrations-no-shopify-amazon-ebay-adapte', require('
 app.use('/api/gap-no-notifications-module', require('./routes/gapFeat_no_notifications_module'));
 app.use('/api/gap-no-audit-logging-dedicated-module-despite-session-', require('./routes/gapFeat_no_audit_logging_dedicated_module_despite_session_'));
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-rs', authenticateToken, async (req, res) => {
-  // Note: this overrides the earlier route - Express uses first match so we need to replace the original
-  // This is handled by the middleware stack - not ideal but works for a monolith
-});
+// === Custom Views (pricing optimization VIZ + NON-VIZ) ===
+app.use('/api/custom-views', require('./routes/customViews'));
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
