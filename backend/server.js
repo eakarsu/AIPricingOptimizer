@@ -6,13 +6,21 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+let _ipKeyGen;
+try { ({ ipKeyGenerator: _ipKeyGen } = require('express-rate-limit')); } catch (_) { _ipKeyGen = (req) => (req.ip || 'unknown'); }
 const crypto = require('crypto');
+
+// Validate required environment variables at startup
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is not set. Exiting.');
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// In-memory token blacklist (for logout)
-const tokenBlacklist = new Set();
+// logout counter for periodic cleanup
+let logoutCounter = 0;
 
 // Middleware
 app.use(helmet());
@@ -39,6 +47,29 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/', authLimiter);
 
+// Rate limiting - AI endpoints specifically (20 calls per hour per IP to prevent runaway costs)
+const aiRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20,
+  message: { error: 'AI rate limit exceeded. Maximum 20 AI calls per hour. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req, res) => {
+    // Use user ID if authenticated, else IPv6-safe ip key
+    return req.user ? `user_${req.user.id}` : (typeof _ipKeyGen === 'function' ? _ipKeyGen(req, res) : (req.ip || 'unknown'));
+  },
+  handler: async (req, res) => {
+    // Log rate limit hit to DB
+    try {
+      await pool.query(
+        'INSERT INTO rate_limit_logs (ip_address, endpoint, method, request_count, window_start, window_end, blocked, user_id) VALUES ($1, $2, $3, $4, NOW(), NOW() + INTERVAL \'1 hour\', true, $5)',
+        [req.ip, req.path, req.method, 1, req.user ? req.user.id : null]
+      );
+    } catch (e) { /* ignore logging errors */ }
+    res.status(429).json({ error: 'AI rate limit exceeded. Maximum 20 AI calls per hour. Please try again later.' });
+  }
+});
+
 // Database connection
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -48,17 +79,71 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'postgres',
 });
 
-// Test database connection
-pool.query('SELECT NOW()', (err, res) => {
+// Test database connection and create new tables
+pool.query('SELECT NOW()', async (err, res) => {
   if (err) {
     console.error('Database connection error:', err);
   } else {
     console.log('Database connected successfully');
+    // Create token_blacklist table for persistent token revocation
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS token_blacklist (
+        token TEXT PRIMARY KEY,
+        expires_at TIMESTAMP NOT NULL
+      )
+    `).catch(e => console.error('Error creating token_blacklist:', e.message));
+
+    // Create ai_usage_log table for tracking AI API consumption
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_usage_log (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        endpoint VARCHAR(100),
+        tokens_input INTEGER,
+        tokens_output INTEGER,
+        cost_usd DECIMAL(10,6),
+        model VARCHAR(100),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch(e => console.error('Error creating ai_usage_log:', e.message));
+
+    // Create ai_results table for AI response persistence
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_results (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        endpoint VARCHAR(200),
+        input_data JSONB,
+        result JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch(e => console.error('Error creating ai_results:', e.message));
+
+    // Create competitor_prices table for per-product competitor price tracking
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS competitor_prices (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER,
+        user_id INTEGER,
+        competitor VARCHAR(255) NOT NULL,
+        price NUMERIC(10,2) NOT NULL,
+        date DATE DEFAULT CURRENT_DATE,
+        notes TEXT,
+        ai_analysis JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch(e => console.error('Error creating competitor_prices:', e.message));
+
+    // Ensure user_id columns exist on key tables for multi-tenancy
+    await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS user_id INTEGER').catch(() => {});
+    await pool.query('ALTER TABLE competitors ADD COLUMN IF NOT EXISTS user_id INTEGER').catch(() => {});
+    await pool.query('ALTER TABLE demand_signals ADD COLUMN IF NOT EXISTS user_id INTEGER').catch(() => {});
+    await pool.query('ALTER TABLE price_suggestions ADD COLUMN IF NOT EXISTS user_id INTEGER').catch(() => {});
   }
 });
 
-// JWT Middleware (with token blacklist check)
-const authenticateToken = (req, res, next) => {
+// JWT Middleware (with DB-backed token blacklist check)
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -66,8 +151,17 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access denied' });
   }
 
-  if (tokenBlacklist.has(token)) {
-    return res.status(401).json({ error: 'Token has been revoked. Please login again.' });
+  // Check DB-backed token blacklist
+  try {
+    const blacklistCheck = await pool.query(
+      'SELECT 1 FROM token_blacklist WHERE token = $1 AND expires_at > NOW()',
+      [token]
+    );
+    if (blacklistCheck.rows.length > 0) {
+      return res.status(401).json({ error: 'Token has been revoked. Please login again.' });
+    }
+  } catch (e) {
+    // If DB check fails, fall through to JWT verify
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
@@ -119,8 +213,9 @@ const paginate = (query, page, limit) => {
 };
 
 // OpenRouter AI Integration
-async function callOpenRouter(prompt, systemPrompt = 'You are an AI pricing optimization expert.') {
+async function callOpenRouter(prompt, systemPrompt = 'You are an AI pricing optimization expert.', options = {}) {
   try {
+    const model = process.env.AI_MODEL || 'anthropic/claude-3-5-sonnet-20241022';
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -130,7 +225,7 @@ async function callOpenRouter(prompt, systemPrompt = 'You are an AI pricing opti
         'X-Title': 'AI Pricing Optimizer'
       },
       body: JSON.stringify({
-        model: process.env.AI_MODEL || 'anthropic/claude-haiku-4.5',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: prompt }
@@ -141,12 +236,36 @@ async function callOpenRouter(prompt, systemPrompt = 'You are an AI pricing opti
 
     const data = await response.json();
     if (data.choices && data.choices[0]) {
-      return data.choices[0].message.content;
+      // Return content plus usage metadata for logging
+      const result = data.choices[0].message.content;
+      result.__usage = data.usage || {};
+      result.__model = data.model || model;
+      return result;
     }
     return 'Unable to generate AI response';
   } catch (error) {
     console.error('OpenRouter API error:', error);
     return 'AI service temporarily unavailable';
+  }
+}
+
+// Helper: Log AI usage to database
+async function logAIUsage(userId, endpoint, aiResponse, model) {
+  try {
+    const usage = (typeof aiResponse === 'string' && aiResponse.__usage) ? aiResponse.__usage : {};
+    const tokensInput = usage.prompt_tokens || 0;
+    const tokensOutput = usage.completion_tokens || 0;
+    // Rough cost estimate: claude-3-5-sonnet is ~$3/1M input, ~$15/1M output
+    const costUsd = (tokensInput * 3 / 1_000_000) + (tokensOutput * 15 / 1_000_000);
+    const modelUsed = (typeof aiResponse === 'string' && aiResponse.__model) ? aiResponse.__model : (model || 'anthropic/claude-3-5-sonnet-20241022');
+
+    await pool.query(
+      'INSERT INTO ai_usage_log (user_id, endpoint, tokens_input, tokens_output, cost_usd, model) VALUES ($1, $2, $3, $4, $5, $6)',
+      [userId, endpoint, tokensInput, tokensOutput, costUsd, modelUsed]
+    );
+  } catch (e) {
+    // Don't fail the request if logging fails
+    console.error('AI usage logging error:', e.message);
   }
 }
 
@@ -166,6 +285,33 @@ function extractJSON(response, type = 'object') {
   const pattern = type === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
   const match = cleaned.match(pattern);
   return match ? match[0] : null;
+}
+
+// 3-strategy parseAIJson: tries direct parse, code-block strip, regex extract
+function parseAIJson(text, type = 'object') {
+  if (!text) return null;
+  // Strategy 1: direct parse
+  try { return JSON.parse(text); } catch (_) {}
+  // Strategy 2: strip markdown and retry
+  const cleaned = cleanAIResponse(text);
+  try { return JSON.parse(cleaned); } catch (_) {}
+  // Strategy 3: regex extract
+  const jsonStr = extractJSON(cleaned, type);
+  if (jsonStr) { try { return JSON.parse(jsonStr); } catch (_) {} }
+  return null;
+}
+
+// Persist AI result to ai_results table
+async function persistAIResult(userId, endpoint, inputData, resultData) {
+  try {
+    await pool.query(
+      `INSERT INTO ai_results (user_id, endpoint, input_data, result, created_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [userId, endpoint, JSON.stringify(inputData), JSON.stringify(resultData)]
+    );
+  } catch (e) {
+    console.error('Error persisting AI result:', e.message);
+  }
 }
 
 // ==================== AUTH ROUTES ====================
@@ -257,19 +403,29 @@ app.post('/api/auth/check-password-strength', (req, res) => {
 });
 
 // ==================== LOGOUT ====================
-app.post('/api/auth/logout', authenticateToken, (req, res) => {
-  tokenBlacklist.add(req.token);
-  // Clean up expired tokens periodically (every 100 logouts)
-  if (tokenBlacklist.size % 100 === 0) {
-    for (const t of tokenBlacklist) {
-      try {
-        jwt.verify(t, process.env.JWT_SECRET);
-      } catch {
-        tokenBlacklist.delete(t);
-      }
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  try {
+    // Get token expiry from JWT payload
+    const decoded = jwt.decode(req.token);
+    const expiresAt = decoded && decoded.exp ? new Date(decoded.exp * 1000) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    // Insert token into DB blacklist
+    await pool.query(
+      'INSERT INTO token_blacklist (token, expires_at) VALUES ($1, $2) ON CONFLICT (token) DO NOTHING',
+      [req.token, expiresAt]
+    );
+
+    // Periodic cleanup: every 100 logouts, delete expired tokens
+    logoutCounter++;
+    if (logoutCounter % 100 === 0) {
+      pool.query('DELETE FROM token_blacklist WHERE expires_at < NOW()').catch(e => console.error('Token cleanup error:', e.message));
     }
+
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  res.json({ message: 'Logged out successfully' });
 });
 
 // ==================== CHANGE PASSWORD ====================
@@ -298,8 +454,13 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.user.id]);
 
-    // Blacklist current token to force re-login
-    tokenBlacklist.add(req.token);
+    // Blacklist current token to force re-login (DB-backed)
+    const decoded = jwt.decode(req.token);
+    const expiresAt = decoded && decoded.exp ? new Date(decoded.exp * 1000) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await pool.query(
+      'INSERT INTO token_blacklist (token, expires_at) VALUES ($1, $2) ON CONFLICT (token) DO NOTHING',
+      [req.token, expiresAt]
+    );
 
     res.json({ message: 'Password changed successfully. Please login again.' });
   } catch (error) {
@@ -480,7 +641,31 @@ app.get('/api/email-verifications', authenticateToken, authorize('admin'), async
 // ==================== PRODUCTS ROUTES ====================
 app.get('/api/products', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM products ORDER BY created_at DESC');
+    const userId = req.user.id;
+    const page = parseInt(req.query.page) || null;
+    const limit = parseInt(req.query.limit) || 20;
+
+    if (page) {
+      const offset = (page - 1) * limit;
+      const countResult = await pool.query(
+        'SELECT COUNT(*) as count FROM products WHERE user_id = $1 OR user_id IS NULL',
+        [userId]
+      );
+      const total = parseInt(countResult.rows[0].count);
+      const result = await pool.query(
+        'SELECT * FROM products WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+        [userId, limit, offset]
+      );
+      return res.json({
+        data: result.rows,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+      });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM products WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC',
+      [userId]
+    );
     res.json(result.rows);
   } catch (error) {
     console.error('Error fetching products:', error);
@@ -490,7 +675,10 @@ app.get('/api/products', authenticateToken, async (req, res) => {
 
 app.get('/api/products/:id', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM products WHERE id = $1', [req.params.id]);
+    const result = await pool.query(
+      'SELECT * FROM products WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [req.params.id, req.user.id]
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
@@ -505,8 +693,8 @@ app.post('/api/products', authenticateToken, async (req, res) => {
   try {
     const { name, description, current_price, cost, category, sku } = req.body;
     const result = await pool.query(
-      'INSERT INTO products (name, description, current_price, cost, category, sku) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [name, description, current_price, cost, category, sku]
+      'INSERT INTO products (name, description, current_price, cost, category, sku, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [name, description, current_price, cost, category, sku, req.user.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -548,7 +736,10 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
 // ==================== COMPETITORS ROUTES ====================
 app.get('/api/competitors', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM competitors ORDER BY created_at DESC');
+    const result = await pool.query(
+      'SELECT * FROM competitors WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC',
+      [req.user.id]
+    );
     res.json(result.rows);
   } catch (error) {
     console.error('Error fetching competitors:', error);
@@ -573,8 +764,8 @@ app.post('/api/competitors', authenticateToken, async (req, res) => {
   try {
     const { name, website, product_name, competitor_price, our_price, market_position, notes } = req.body;
     const result = await pool.query(
-      'INSERT INTO competitors (name, website, product_name, competitor_price, our_price, market_position, notes) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [name, website, product_name, competitor_price, our_price, market_position, notes]
+      'INSERT INTO competitors (name, website, product_name, competitor_price, our_price, market_position, notes, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [name, website, product_name, competitor_price, our_price, market_position, notes, req.user.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -614,7 +805,7 @@ app.delete('/api/competitors/:id', authenticateToken, async (req, res) => {
 });
 
 // AI Competitor Analysis
-app.post('/api/competitors/analyze', authenticateToken, async (req, res) => {
+app.post('/api/competitors/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { competitorId } = req.body;
 
@@ -640,6 +831,7 @@ app.post('/api/competitors/analyze', authenticateToken, async (req, res) => {
     4. Market share implications`;
 
     const analysis = await callOpenRouter(prompt);
+    await logAIUsage(req.user.id, '/api/competitors/analyze', analysis, null);
     res.json({ analysis });
   } catch (error) {
     console.error('Error analyzing competitor:', error);
@@ -650,7 +842,10 @@ app.post('/api/competitors/analyze', authenticateToken, async (req, res) => {
 // ==================== DEMAND SIGNALS ROUTES ====================
 app.get('/api/demand-signals', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM demand_signals ORDER BY created_at DESC');
+    const result = await pool.query(
+      'SELECT * FROM demand_signals WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC',
+      [req.user.id]
+    );
     res.json(result.rows);
   } catch (error) {
     console.error('Error fetching demand signals:', error);
@@ -675,8 +870,8 @@ app.post('/api/demand-signals', authenticateToken, async (req, res) => {
   try {
     const { product_name, signal_type, signal_strength, source, trend, volume, notes } = req.body;
     const result = await pool.query(
-      'INSERT INTO demand_signals (product_name, signal_type, signal_strength, source, trend, volume, notes) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [product_name, signal_type, signal_strength, source, trend, volume, notes]
+      'INSERT INTO demand_signals (product_name, signal_type, signal_strength, source, trend, volume, notes, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [product_name, signal_type, signal_strength, source, trend, volume, notes, req.user.id]
     );
     res.json(result.rows[0]);
   } catch (error) {
@@ -716,7 +911,7 @@ app.delete('/api/demand-signals/:id', authenticateToken, async (req, res) => {
 });
 
 // AI Demand Analysis
-app.post('/api/demand-signals/analyze', authenticateToken, async (req, res) => {
+app.post('/api/demand-signals/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { signalId } = req.body;
 
@@ -742,6 +937,7 @@ app.post('/api/demand-signals/analyze', authenticateToken, async (req, res) => {
     4. Timing recommendations for price changes`;
 
     const analysis = await callOpenRouter(prompt);
+    await logAIUsage(req.user.id, '/api/demand-signals/analyze', analysis, null);
     res.json({ analysis });
   } catch (error) {
     console.error('Error analyzing demand signal:', error);
@@ -1018,7 +1214,7 @@ Respond ONLY with this JSON (no other text):
 }
 
 // AI Price Suggestion Generator (ENHANCED)
-app.post('/api/price-suggestions/generate', authenticateToken, async (req, res) => {
+app.post('/api/price-suggestions/generate', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
 
@@ -1035,6 +1231,7 @@ app.post('/api/price-suggestions/generate', authenticateToken, async (req, res) 
     const prompt = buildPricingPrompt(product, dataSources, dataConfidence);
 
     const aiResponse = await callOpenRouter(prompt, 'You are an expert AI pricing strategist with deep knowledge of competitive pricing, demand elasticity, and market dynamics.');
+    await logAIUsage(req.user.id, '/api/price-suggestions/generate', aiResponse, null);
 
     // Try to parse AI response as JSON
     try {
@@ -1044,8 +1241,8 @@ app.post('/api/price-suggestions/generate', authenticateToken, async (req, res) 
 
         // Save to database
         const result = await pool.query(
-          'INSERT INTO price_suggestions (product_name, current_price, suggested_price, confidence, reason, expected_impact, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-          [product.name, product.current_price, suggestion.suggested_price, suggestion.confidence, suggestion.reason, suggestion.expected_impact, 'pending']
+          'INSERT INTO price_suggestions (product_name, current_price, suggested_price, confidence, reason, expected_impact, status, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+          [product.name, product.current_price, suggestion.suggested_price, suggestion.confidence, suggestion.reason, suggestion.expected_impact, 'pending', req.user.id]
         );
 
         res.json({
@@ -1073,7 +1270,7 @@ app.post('/api/price-suggestions/generate', authenticateToken, async (req, res) 
 });
 
 // AI Price Suggestion Preview (ENHANCED - doesn't save to database)
-app.post('/api/price-suggestions/preview', authenticateToken, async (req, res) => {
+app.post('/api/price-suggestions/preview', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
 
@@ -1090,6 +1287,7 @@ app.post('/api/price-suggestions/preview', authenticateToken, async (req, res) =
     const prompt = buildPricingPrompt(product, dataSources, dataConfidence);
 
     const aiResponse = await callOpenRouter(prompt, 'You are an expert AI pricing strategist with deep knowledge of competitive pricing, demand elasticity, and market dynamics.');
+    await logAIUsage(req.user.id, '/api/price-suggestions/preview', aiResponse, null);
 
     // Try to parse AI response as JSON
     try {
@@ -1265,7 +1463,7 @@ app.delete('/api/market-trends/:id', authenticateToken, async (req, res) => {
 });
 
 // AI Market Trend Analysis
-app.post('/api/market-trends/analyze', authenticateToken, async (req, res) => {
+app.post('/api/market-trends/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { trendId } = req.body;
 
@@ -1291,6 +1489,7 @@ app.post('/api/market-trends/analyze', authenticateToken, async (req, res) => {
     4. Risk assessment and mitigation strategies`;
 
     const analysis = await callOpenRouter(prompt);
+    await logAIUsage(req.user.id, '/api/market-trends/analyze', analysis, null);
     res.json({ analysis });
   } catch (error) {
     console.error('Error analyzing market trend:', error);
@@ -1367,7 +1566,7 @@ app.delete('/api/ai-insights/:id', authenticateToken, async (req, res) => {
 });
 
 // Generate comprehensive AI insights
-app.post('/api/ai-insights/generate', authenticateToken, async (req, res) => {
+app.post('/api/ai-insights/generate', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     // Get all relevant data
     const products = await pool.query('SELECT * FROM products');
@@ -1397,6 +1596,7 @@ app.post('/api/ai-insights/generate', authenticateToken, async (req, res) => {
     ]`;
 
     const aiResponse = await callOpenRouter(prompt);
+    await logAIUsage(req.user.id, '/api/ai-insights/generate', aiResponse, null);
 
     try {
       const jsonMatch = aiResponse.match(/\[[\s\S]*\]/);
@@ -1642,7 +1842,7 @@ app.delete('/api/competitor-tracking/:id', authenticateToken, async (req, res) =
 });
 
 // AI Competitor Tracking Analysis
-app.post('/api/competitor-tracking/analyze', authenticateToken, async (req, res) => {
+app.post('/api/competitor-tracking/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { trackingId } = req.body;
 
@@ -1695,6 +1895,7 @@ Please provide a comprehensive analysis in the following JSON format:
 }`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are a competitive pricing strategist with expertise in e-commerce market dynamics.');
+    await logAIUsage(req.user.id, '/api/competitor-tracking/analyze', aiResponse, null);
 
     // Parse the AI response
     let parsedAnalysis = null;
@@ -1789,7 +1990,7 @@ app.delete('/api/demand-forecasts/:id', authenticateToken, async (req, res) => {
 });
 
 // AI Demand Forecast Generation
-app.post('/api/demand-forecasts/generate', authenticateToken, async (req, res) => {
+app.post('/api/demand-forecasts/generate', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
 
@@ -1841,6 +2042,7 @@ Please provide a demand forecast in the following JSON format:
 
     console.log('=== Calling OpenRouter for demand forecast ===');
     const aiResponse = await callOpenRouter(prompt, 'You are a demand forecasting expert with deep knowledge of e-commerce patterns and consumer behavior.');
+    await logAIUsage(req.user.id, '/api/demand-forecasts/generate', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 200));
 
     try {
@@ -1897,7 +2099,7 @@ Please provide a demand forecast in the following JSON format:
 });
 
 // Analyze specific demand forecast with AI
-app.post('/api/demand-forecasts/analyze', authenticateToken, async (req, res) => {
+app.post('/api/demand-forecasts/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { forecastId } = req.body;
     console.log('=== Analyzing demand forecast:', forecastId, '===');
@@ -1954,6 +2156,7 @@ Please provide a comprehensive demand analysis in this JSON format:
 
     console.log('=== Calling OpenRouter for demand analysis ===');
     const aiResponse = await callOpenRouter(prompt, 'You are a demand forecasting expert specializing in market analysis, consumer behavior, and pricing strategy.');
+    await logAIUsage(req.user.id, '/api/demand-forecasts/analyze', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 300));
 
     try {
@@ -2051,7 +2254,7 @@ app.delete('/api/bundle-recommendations/:id', authenticateToken, async (req, res
 });
 
 // AI Bundle Generation
-app.post('/api/bundle-recommendations/generate', authenticateToken, async (req, res) => {
+app.post('/api/bundle-recommendations/generate', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const products = await pool.query('SELECT * FROM products ORDER BY category, current_price');
     const demandSignals = await pool.query('SELECT * FROM demand_signals ORDER BY signal_strength DESC LIMIT 20');
@@ -2086,6 +2289,7 @@ Please recommend 3 profitable product bundles in this JSON format:
 
     console.log('=== Calling OpenRouter for bundle recommendations ===');
     const aiResponse = await callOpenRouter(prompt, 'You are a retail merchandising expert specializing in product bundling and cross-selling strategies.');
+    await logAIUsage(req.user.id, '/api/bundle-recommendations/generate', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 300));
 
     try {
@@ -2120,7 +2324,7 @@ Please recommend 3 profitable product bundles in this JSON format:
 });
 
 // AI Analyze Specific Bundle
-app.post('/api/bundle-recommendations/analyze', authenticateToken, async (req, res) => {
+app.post('/api/bundle-recommendations/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { bundleId } = req.body;
     console.log('=== Analyzing bundle:', bundleId, '===');
@@ -2177,6 +2381,7 @@ Please provide a comprehensive bundle analysis in this JSON format:
 
     console.log('=== Calling OpenRouter for bundle analysis ===');
     const aiResponse = await callOpenRouter(prompt, 'You are a retail strategy expert specializing in product bundling, pricing optimization, and customer psychology.');
+    await logAIUsage(req.user.id, '/api/bundle-recommendations/analyze', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 300));
 
     // Update the bundle with new AI analysis
@@ -2276,7 +2481,7 @@ app.delete('/api/discount-optimizations/:id', authenticateToken, async (req, res
 });
 
 // AI Discount Optimization
-app.post('/api/discount-optimizations/generate', authenticateToken, async (req, res) => {
+app.post('/api/discount-optimizations/generate', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
 
@@ -2331,6 +2536,7 @@ Please calculate the optimal discount in this JSON format:
 }`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are a pricing analyst expert in discount optimization and promotional strategies.');
+    await logAIUsage(req.user.id, '/api/discount-optimizations/generate', aiResponse, null);
 
     try {
       const jsonString = extractJSON(aiResponse, 'object');
@@ -2356,7 +2562,7 @@ Please calculate the optimal discount in this JSON format:
 });
 
 // Analyze specific discount optimization with AI
-app.post('/api/discount-optimizations/analyze', authenticateToken, async (req, res) => {
+app.post('/api/discount-optimizations/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { optimizationId } = req.body;
     console.log('=== Analyzing discount optimization:', optimizationId, '===');
@@ -2413,6 +2619,7 @@ Please provide a comprehensive discount analysis in this JSON format:
 
     console.log('=== Calling OpenRouter for discount analysis ===');
     const aiResponse = await callOpenRouter(prompt, 'You are a retail pricing strategist expert in discount optimization, promotional psychology, and revenue management.');
+    await logAIUsage(req.user.id, '/api/discount-optimizations/analyze', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 300));
 
     try {
@@ -2510,7 +2717,7 @@ app.delete('/api/price-elasticity/:id', authenticateToken, async (req, res) => {
 });
 
 // AI Price Elasticity Analysis
-app.post('/api/price-elasticity/analyze', authenticateToken, async (req, res) => {
+app.post('/api/price-elasticity/analyze', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
 
@@ -2567,6 +2774,7 @@ Please analyze price elasticity and provide results in this JSON format:
 }`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are an economist specializing in price elasticity analysis and demand modeling.');
+    await logAIUsage(req.user.id, '/api/price-elasticity/analyze', aiResponse, null);
 
     try {
       const jsonString = extractJSON(aiResponse, 'object');
@@ -2592,7 +2800,7 @@ Please analyze price elasticity and provide results in this JSON format:
 });
 
 // Analyze specific price elasticity record with AI
-app.post('/api/price-elasticity/analyze-item', authenticateToken, async (req, res) => {
+app.post('/api/price-elasticity/analyze-item', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { elasticityId } = req.body;
     console.log('=== Analyzing price elasticity item:', elasticityId, '===');
@@ -2648,6 +2856,7 @@ Please provide a comprehensive elasticity analysis in this JSON format:
 
     console.log('=== Calling OpenRouter for elasticity analysis ===');
     const aiResponse = await callOpenRouter(prompt, 'You are an economist and pricing strategist specializing in price elasticity analysis, demand modeling, and revenue optimization.');
+    await logAIUsage(req.user.id, '/api/price-elasticity/analyze-item', aiResponse, null);
     console.log('AI Response received:', aiResponse?.substring(0, 300));
 
     try {
@@ -2833,7 +3042,7 @@ app.delete('/api/price-tracker-alerts/:id', authenticateToken, async (req, res) 
 });
 
 // AI: Analyze deal
-app.post('/api/price-tracker/ai/analyze-deal', authenticateToken, async (req, res) => {
+app.post('/api/price-tracker/ai/analyze-deal', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
     const productResult = await pool.query(`
@@ -2868,6 +3077,7 @@ Please provide:
 4. Any concerns or red flags`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are an AI deal analyst for e-commerce. Evaluate deals and provide buying recommendations.');
+    await logAIUsage(req.user.id, '/api/price-tracker/ai/analyze-deal', aiResponse, null);
 
     res.json({
       product: product.name,
@@ -2876,7 +3086,7 @@ Please provide:
       originalPrice: product.original_price,
       discount: `${discount}%`,
       analysis: aiResponse,
-      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5',
+      model: process.env.AI_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -2886,7 +3096,7 @@ Please provide:
 });
 
 // AI: Predict price
-app.post('/api/price-tracker/ai/predict-price', authenticateToken, async (req, res) => {
+app.post('/api/price-tracker/ai/predict-price', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const { productId } = req.body;
     const productResult = await pool.query('SELECT * FROM price_tracker WHERE id = $1', [productId]);
@@ -2912,12 +3122,13 @@ Please provide:
 5. Confidence level (low/medium/high)`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are an AI price prediction expert. Analyze products and provide price predictions.');
+    await logAIUsage(req.user.id, '/api/price-tracker/ai/predict-price', aiResponse, null);
 
     res.json({
       product: product.name,
       currentPrice: product.current_price,
       analysis: aiResponse,
-      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5',
+      model: process.env.AI_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -2927,7 +3138,7 @@ Please provide:
 });
 
 // AI: Get recommendations
-app.get('/api/price-tracker/ai/recommendations', authenticateToken, async (req, res) => {
+app.get('/api/price-tracker/ai/recommendations', authenticateToken, aiRateLimiter, async (req, res) => {
   try {
     const dealsResult = await pool.query(`
       SELECT pt.*, s.name as store_name, c.name as category_name,
@@ -2955,11 +3166,12 @@ Please provide:
 3. Any deals to skip and why`;
 
     const aiResponse = await callOpenRouter(prompt, 'You are an AI shopping assistant. Provide personalized product recommendations based on current deals.');
+    await logAIUsage(req.user.id, '/api/price-tracker/ai/recommendations', aiResponse, null);
 
     res.json({
       topDeals: dealsResult.rows,
       analysis: aiResponse,
-      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5',
+      model: process.env.AI_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -3803,7 +4015,391 @@ app.delete('/api/password-validations/:id', authenticateToken, authorize('admin'
   }
 });
 
+// ==================== AI USAGE SUMMARY ====================
+app.get('/api/ai/usage-summary', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Total tokens and cost for this user
+    const totalResult = await pool.query(
+      `SELECT
+        COALESCE(SUM(tokens_input), 0) as total_tokens_input,
+        COALESCE(SUM(tokens_output), 0) as total_tokens_output,
+        COALESCE(SUM(tokens_input + tokens_output), 0) as total_tokens,
+        COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+        COUNT(*) as total_calls
+       FROM ai_usage_log WHERE user_id = $1`,
+      [userId]
+    );
+
+    // Per-endpoint breakdown
+    const perEndpoint = await pool.query(
+      `SELECT
+        endpoint,
+        COUNT(*) as calls,
+        COALESCE(SUM(tokens_input), 0) as tokens_input,
+        COALESCE(SUM(tokens_output), 0) as tokens_output,
+        COALESCE(SUM(cost_usd), 0) as cost_usd
+       FROM ai_usage_log WHERE user_id = $1
+       GROUP BY endpoint
+       ORDER BY calls DESC`,
+      [userId]
+    );
+
+    // Recent usage (last 10)
+    const recentUsage = await pool.query(
+      'SELECT * FROM ai_usage_log WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10',
+      [userId]
+    );
+
+    res.json({
+      summary: totalResult.rows[0],
+      byEndpoint: perEndpoint.rows,
+      recentCalls: recentUsage.rows
+    });
+  } catch (error) {
+    console.error('Error fetching AI usage summary:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ==================== PRICING SIMULATION SANDBOX ====================
+app.post('/api/ai/price-simulation', authenticateToken, aiRateLimiter, async (req, res) => {
+  try {
+    const { product_id, scenario_prices } = req.body;
+
+    if (!product_id || !Array.isArray(scenario_prices) || scenario_prices.length < 1) {
+      return res.status(400).json({ error: 'product_id and scenario_prices (array of 1-3 prices) are required' });
+    }
+
+    // Limit to 3 scenario prices
+    const prices = scenario_prices.slice(0, 3);
+
+    // Fetch product
+    const productResult = await pool.query(
+      'SELECT * FROM products WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [product_id, req.user.id]
+    );
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    const product = productResult.rows[0];
+
+    // Fetch demand signals
+    const demandResult = await pool.query(
+      'SELECT * FROM demand_signals WHERE product_name ILIKE $1 ORDER BY signal_strength DESC LIMIT 5',
+      [`%${product.name}%`]
+    );
+
+    // Fetch price history
+    const priceHistResult = await pool.query(
+      'SELECT * FROM price_history WHERE product_name ILIKE $1 ORDER BY change_date DESC LIMIT 10',
+      [`%${product.name}%`]
+    );
+
+    const margin = ((product.current_price - product.cost) / product.current_price * 100).toFixed(2);
+
+    const prompt = `For this product with the given demand signals and price history, predict the revenue impact of these price points.
+
+PRODUCT:
+- Name: ${product.name}
+- Category: ${product.category || 'N/A'}
+- Current Price: $${product.current_price}
+- Cost: $${product.cost}
+- Current Margin: ${margin}%
+
+DEMAND SIGNALS:
+${demandResult.rows.map(d => `- ${d.signal_type}: Strength ${d.signal_strength}/100, Trend: ${d.trend}`).join('\n') || 'No demand signals'}
+
+PRICE HISTORY:
+${priceHistResult.rows.slice(0, 5).map(h => `- $${h.old_price} → $${h.new_price} on ${new Date(h.change_date).toLocaleDateString()}`).join('\n') || 'No price history'}
+
+SCENARIO PRICES TO ANALYZE: ${prices.map((p, i) => `Scenario ${i + 1}: $${p}`).join(', ')}
+
+Return ONLY this JSON (no other text):
+{
+  "scenarios": [
+    ${prices.map((p, i) => `{
+      "scenario": ${i + 1},
+      "price": ${p},
+      "predicted_units": <estimated units sold per month>,
+      "predicted_revenue": <price * predicted_units>,
+      "margin_impact": <percentage margin at this price>,
+      "risk": "low|medium|high"
+    }`).join(',\n    ')}
+  ],
+  "recommendation": {
+    "price": <best price from the scenarios>,
+    "rationale": "<2-3 sentence explanation of why this price is optimal>"
+  }
+}`;
+
+    const aiResponse = await callOpenRouter(prompt, 'You are an expert pricing analyst specializing in revenue optimization and demand forecasting.');
+    await logAIUsage(req.user.id, '/api/ai/price-simulation', aiResponse, null);
+
+    try {
+      const jsonString = extractJSON(aiResponse, 'object');
+      if (jsonString) {
+        const simulation = JSON.parse(jsonString);
+        res.json({
+          product: { id: product.id, name: product.name, current_price: product.current_price, cost: product.cost },
+          simulation,
+          rawResponse: aiResponse
+        });
+      } else {
+        res.json({ aiResponse, message: 'AI response could not be parsed as structured simulation' });
+      }
+    } catch (parseError) {
+      res.json({ aiResponse, message: 'AI response provided as text' });
+    }
+  } catch (error) {
+    console.error('Error running price simulation:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ==================== COMPETITOR PRICES (per product) ====================
+app.get('/api/products/:id/competitor-prices', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM competitor_prices WHERE product_id = $1 AND user_id = $2 ORDER BY date DESC',
+      [req.params.id, req.user.id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching competitor prices:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/products/:id/competitor-prices', authenticateToken, aiRateLimiter, async (req, res) => {
+  try {
+    const { observations } = req.body; // array of { competitor, price, date }
+    if (!Array.isArray(observations) || observations.length === 0) {
+      return res.status(400).json({ error: 'observations must be a non-empty array of { competitor, price, date }' });
+    }
+
+    const productResult = await pool.query(
+      'SELECT * FROM products WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [req.params.id, req.user.id]
+    );
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    const product = productResult.rows[0];
+
+    // Insert all observations
+    const inserted = [];
+    for (const obs of observations) {
+      const r = await pool.query(
+        'INSERT INTO competitor_prices (product_id, user_id, competitor, price, date, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [req.params.id, req.user.id, obs.competitor, obs.price, obs.date || new Date(), obs.notes || null]
+      );
+      inserted.push(r.rows[0]);
+    }
+
+    // AI analysis of the competitor prices
+    const prompt = `You are a pricing analyst. Analyze these competitor price observations for product "${product.name}" (our price: $${product.current_price}).
+
+Competitor observations:
+${observations.map(o => `- ${o.competitor}: $${o.price} on ${o.date || 'recent'}`).join('\n')}
+
+Respond ONLY with JSON:
+{
+  "average_competitor_price": <number>,
+  "price_position": "below_market|at_market|above_market",
+  "recommendation": "<1-2 sentences on optimal pricing action>",
+  "urgency": "immediate|short_term|monitor",
+  "potential_revenue_impact": "<estimated % revenue change if we adjust price>"
+}`;
+
+    const aiResponse = await callOpenRouter(prompt, 'You are an expert competitive pricing analyst.');
+    const parsed = parseAIJson(aiResponse);
+    await logAIUsage(req.user.id, '/api/products/:id/competitor-prices', aiResponse, null);
+    await persistAIResult(req.user.id, `/api/products/${req.params.id}/competitor-prices`, { product_id: req.params.id, observations }, parsed || aiResponse);
+
+    // Store analysis on the most recent row
+    if (inserted.length > 0 && parsed) {
+      await pool.query(
+        'UPDATE competitor_prices SET ai_analysis = $1 WHERE id = $2',
+        [JSON.stringify(parsed), inserted[inserted.length - 1].id]
+      );
+    }
+
+    res.status(201).json({ inserted, ai_analysis: parsed || aiResponse });
+  } catch (error) {
+    console.error('Error adding competitor prices:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ==================== PRICE ELASTICITY ANALYZER ====================
+app.post('/api/ai/elasticity', authenticateToken, aiRateLimiter, async (req, res) => {
+  try {
+    const { product_id } = req.body;
+    if (!product_id) return res.status(400).json({ error: 'product_id is required' });
+
+    const productResult = await pool.query(
+      'SELECT * FROM products WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [product_id, req.user.id]
+    );
+    if (productResult.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
+    const product = productResult.rows[0];
+
+    // Fetch price history
+    const priceHistory = await pool.query(
+      'SELECT * FROM price_history WHERE product_name ILIKE $1 ORDER BY change_date DESC LIMIT 10',
+      [`%${product.name}%`]
+    );
+    const demandSignals = await pool.query(
+      'SELECT * FROM demand_signals WHERE product_name ILIKE $1 ORDER BY signal_strength DESC LIMIT 5',
+      [`%${product.name}%`]
+    );
+
+    const prompt = `Estimate price elasticity for this product and determine the optimal price point.
+
+PRODUCT: ${product.name} (${product.category || 'N/A'})
+Current Price: $${product.current_price} | Cost: $${product.cost}
+
+PRICE HISTORY:
+${priceHistory.rows.map(h => `- $${h.old_price} → $${h.new_price} on ${new Date(h.change_date).toLocaleDateString()} (reason: ${h.change_reason || 'N/A'})`).join('\n') || 'No history'}
+
+DEMAND SIGNALS:
+${demandSignals.rows.map(d => `- ${d.signal_type}: strength ${d.signal_strength}/100, trend: ${d.trend}`).join('\n') || 'No signals'}
+
+Respond ONLY with JSON:
+{
+  "elasticity_coefficient": <negative number, e.g. -1.5>,
+  "elasticity_type": "elastic|inelastic|unit_elastic",
+  "interpretation": "<what this means for revenue>",
+  "optimal_price": <number>,
+  "optimal_price_reasoning": "<why this is optimal>",
+  "price_range": { "min": <number>, "max": <number> },
+  "revenue_maximizing_strategy": "<aggressive|moderate|conservative>",
+  "recommendations": ["<rec 1>", "<rec 2>", "<rec 3>"]
+}`;
+
+    const aiResponse = await callOpenRouter(prompt, 'You are an economist specializing in price elasticity and demand modeling.');
+    const parsed = parseAIJson(aiResponse);
+    await logAIUsage(req.user.id, '/api/ai/elasticity', aiResponse, null);
+    await persistAIResult(req.user.id, '/api/ai/elasticity', { product_id, product_name: product.name }, parsed || aiResponse);
+
+    res.json({ product: { id: product.id, name: product.name, current_price: product.current_price }, elasticity: parsed || aiResponse, raw: aiResponse });
+  } catch (error) {
+    console.error('Error analyzing price elasticity:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ==================== BULK PRICE UPDATE ====================
+app.post('/api/products/bulk-price-update', authenticateToken, async (req, res) => {
+  try {
+    const { updates } = req.body; // array of { product_id, new_price }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ error: 'updates must be a non-empty array of { product_id, new_price }' });
+    }
+
+    // Validate all entries
+    for (const u of updates) {
+      if (!u.product_id || u.new_price === undefined || u.new_price === null) {
+        return res.status(400).json({ error: 'Each update must have product_id and new_price' });
+      }
+      if (isNaN(parseFloat(u.new_price)) || parseFloat(u.new_price) <= 0) {
+        return res.status(400).json({ error: `Invalid new_price for product_id ${u.product_id}` });
+      }
+    }
+
+    const client = await pool.connect();
+    const results = [];
+    try {
+      await client.query('BEGIN');
+      for (const u of updates) {
+        const r = await client.query(
+          'UPDATE products SET current_price = $1, updated_at = NOW() WHERE id = $2 AND (user_id = $3 OR user_id IS NULL) RETURNING id, name, current_price',
+          [parseFloat(u.new_price), u.product_id, req.user.id]
+        );
+        if (r.rows.length > 0) {
+          results.push({ product_id: u.product_id, name: r.rows[0].name, new_price: r.rows[0].current_price, status: 'updated' });
+        } else {
+          results.push({ product_id: u.product_id, status: 'not_found_or_unauthorized' });
+        }
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    const succeeded = results.filter(r => r.status === 'updated').length;
+    res.json({ message: `${succeeded}/${updates.length} products updated`, results });
+  } catch (error) {
+    console.error('Error bulk updating prices:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ==================== AI USAGE STATS ====================
+app.get('/api/ai/usage', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [totals, recent, byEndpoint, countResult] = await Promise.all([
+      pool.query(
+        'SELECT SUM(tokens_input) as total_input, SUM(tokens_output) as total_output, SUM(cost_usd) as total_cost, COUNT(*) as total_calls FROM ai_usage_log WHERE user_id = $1',
+        [userId]
+      ),
+      pool.query(
+        'SELECT * FROM ai_usage_log WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+        [userId, limit, offset]
+      ),
+      pool.query(
+        'SELECT endpoint, COUNT(*) as calls, SUM(tokens_input + tokens_output) as tokens, SUM(cost_usd) as cost FROM ai_usage_log WHERE user_id = $1 GROUP BY endpoint ORDER BY calls DESC',
+        [userId]
+      ),
+      pool.query('SELECT COUNT(*) as count FROM ai_usage_log WHERE user_id = $1', [userId])
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.json({
+      summary: totals.rows[0],
+      by_endpoint: byEndpoint.rows,
+      data: recent.rows,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+    });
+  } catch (error) {
+    console.error('Error fetching AI usage:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Start server
+
+// === Custom Feature Mounts (batch_06) ===
+app.use('/api/cf-agentic-pricing-optimization', require('./routes/customFeat01_AgenticPricingOptimization'));
+app.use('/api/cf-demand-forecasting-ensemble', require('./routes/customFeat02_DemandForecastingEnsemble'));
+app.use('/api/cf-price-elasticity-modeling', require('./routes/customFeat03_PriceElasticityModeling'));
+app.use('/api/cf-competitive-intelligence', require('./routes/customFeat04_CompetitiveIntelligence'));
+app.use('/api/cf-discount-optimization', require('./routes/customFeat05_DiscountOptimization'));
+
+
+// === Batch 06 Gaps & Frontend Mounts ===
+app.use('/api/gap-stronger-price-elasticity-models-per', require('./routes/gapFeat_stronger_price_elasticity_models_per'));
+app.use('/api/gap-no-auto', require('./routes/gapFeat_no_auto'));
+app.use('/api/gap-no-customer', require('./routes/gapFeat_no_customer'));
+app.use('/api/gap-no-dedicated-routes-directory-all-inline', require('./routes/gapFeat_no_dedicated_routes_directory_all_inline'));
+app.use('/api/gap-no-webhooks-for-price', require('./routes/gapFeat_no_webhooks_for_price'));
+app.use('/api/gap-limited-integrations-no-shopify-amazon-ebay-adapte', require('./routes/gapFeat_limited_integrations_no_shopify_amazon_ebay_adapte'));
+app.use('/api/gap-no-notifications-module', require('./routes/gapFeat_no_notifications_module'));
+app.use('/api/gap-no-audit-logging-dedicated-module-despite-session-', require('./routes/gapFeat_no_audit_logging_dedicated_module_despite_session_'));
+
+// === Custom Views (pricing optimization VIZ + NON-VIZ) ===
+app.use('/api/custom-views', require('./routes/customViews'));
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

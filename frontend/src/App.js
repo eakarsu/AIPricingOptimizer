@@ -20,6 +20,10 @@ import BundleRecommendations from './pages/BundleRecommendations';
 import DiscountOptimizations from './pages/DiscountOptimizations';
 import PriceElasticity from './pages/PriceElasticity';
 import PriceTracker from './pages/PriceTracker';
+// New audit features
+import PricingSimulation from './pages/PricingSimulation';
+import AIUsageStats from './pages/AIUsageStats';
+import BulkPriceUpdate from './pages/BulkPriceUpdate';
 // Admin Features
 import PasswordResets from './pages/PasswordResets';
 import PasswordChanges from './pages/PasswordChanges';
@@ -35,6 +39,21 @@ import SecurityHeaders from './pages/SecurityHeaders';
 import EmailVerifications from './pages/EmailVerifications';
 import PasswordValidations from './pages/PasswordValidations';
 
+// // === Batch 06 Gaps & Frontend Mounts ===
+import CFAgenticPricingOptimizationPage from './pages/CFAgenticPricingOptimizationPage';
+import CFDemandForecastingEnsemblePage from './pages/CFDemandForecastingEnsemblePage';
+import CFPriceElasticityModelingPage from './pages/CFPriceElasticityModelingPage';
+import CFCompetitiveIntelligencePage from './pages/CFCompetitiveIntelligencePage';
+import CFDiscountOptimizationPage from './pages/CFDiscountOptimizationPage';
+import GapStrongerPriceElasticityModelsPerPage from './pages/GapStrongerPriceElasticityModelsPerPage';
+import GapNoAutoPage from './pages/GapNoAutoPage';
+import GapNoCustomerPage from './pages/GapNoCustomerPage';
+import GapNoDedicatedRoutesDirectoryAllInlinePage from './pages/GapNoDedicatedRoutesDirectoryAllInlinePage';
+import GapNoWebhooksForPricePage from './pages/GapNoWebhooksForPricePage';
+import GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage from './pages/GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage';
+import GapNoNotificationsModulePage from './pages/GapNoNotificationsModulePage';
+import GapNoAuditLoggingDedicatedModuleDespiteSessionPage from './pages/GapNoAuditLoggingDedicatedModuleDespiteSessionPage';
+import CustomViewsPage from './pages/CustomViewsPage';
 const PrivateRoute = ({ children }) => {
   const { isAuthenticated, loading } = useAuth();
 
@@ -66,6 +85,10 @@ function AppRoutes() {
       <Route path="/discount-optimizations" element={<PrivateRoute><DiscountOptimizations /></PrivateRoute>} />
       <Route path="/price-elasticity" element={<PrivateRoute><PriceElasticity /></PrivateRoute>} />
       <Route path="/price-tracker" element={<PrivateRoute><PriceTracker /></PrivateRoute>} />
+      {/* New Audit Features */}
+      <Route path="/pricing-simulation" element={<PrivateRoute><PricingSimulation /></PrivateRoute>} />
+      <Route path="/ai-usage-stats" element={<PrivateRoute><AIUsageStats /></PrivateRoute>} />
+      <Route path="/bulk-price-update" element={<PrivateRoute><BulkPriceUpdate /></PrivateRoute>} />
       {/* Admin Features */}
       <Route path="/password-resets" element={<PrivateRoute><PasswordResets /></PrivateRoute>} />
       <Route path="/password-changes" element={<PrivateRoute><PasswordChanges /></PrivateRoute>} />
@@ -80,7 +103,23 @@ function AppRoutes() {
       <Route path="/security-headers" element={<PrivateRoute><SecurityHeaders /></PrivateRoute>} />
       <Route path="/email-verifications" element={<PrivateRoute><EmailVerifications /></PrivateRoute>} />
       <Route path="/password-validations" element={<PrivateRoute><PasswordValidations /></PrivateRoute>} />
-    </Routes>
+    
+          {/* // === Batch 06 Gaps & Frontend Mounts === */}
+          <Route path="/cf-agentic-pricing-optimization" element={<CFAgenticPricingOptimizationPage />} />
+          <Route path="/cf-demand-forecasting-ensemble" element={<CFDemandForecastingEnsemblePage />} />
+          <Route path="/cf-price-elasticity-modeling" element={<CFPriceElasticityModelingPage />} />
+          <Route path="/cf-competitive-intelligence" element={<CFCompetitiveIntelligencePage />} />
+          <Route path="/cf-discount-optimization" element={<CFDiscountOptimizationPage />} />
+          <Route path="/gap-stronger-price-elasticity-models-per" element={<GapStrongerPriceElasticityModelsPerPage />} />
+          <Route path="/gap-no-auto" element={<GapNoAutoPage />} />
+          <Route path="/gap-no-customer" element={<GapNoCustomerPage />} />
+          <Route path="/gap-no-dedicated-routes-directory-all-inline" element={<GapNoDedicatedRoutesDirectoryAllInlinePage />} />
+          <Route path="/gap-no-webhooks-for-price" element={<GapNoWebhooksForPricePage />} />
+          <Route path="/gap-limited-integrations-no-shopify-amazon-ebay-adapte" element={<GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage />} />
+          <Route path="/gap-no-notifications-module" element={<GapNoNotificationsModulePage />} />
+          <Route path="/gap-no-audit-logging-dedicated-module-despite-session-" element={<GapNoAuditLoggingDedicatedModuleDespiteSessionPage />} />
+          <Route path="/custom-views" element={<PrivateRoute><CustomViewsPage /></PrivateRoute>} />
+        </Routes>
   );
 }
 
