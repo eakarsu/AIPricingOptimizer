@@ -54,6 +54,9 @@ import GapLimitedIntegrationsNoShopifyAmazonEbayAdaptePage from './pages/GapLimi
 import GapNoNotificationsModulePage from './pages/GapNoNotificationsModulePage';
 import GapNoAuditLoggingDedicatedModuleDespiteSessionPage from './pages/GapNoAuditLoggingDedicatedModuleDespiteSessionPage';
 import CustomViewsPage from './pages/CustomViewsPage';
+import CodexCustomVizFeature from './pages/CodexCustomVizFeature';
+import CodexOperationsFeature from './pages/CodexOperationsFeature';
+
 const PrivateRoute = ({ children }) => {
   const { isAuthenticated, loading } = useAuth();
 
@@ -67,6 +70,9 @@ const PrivateRoute = ({ children }) => {
 function AppRoutes() {
   return (
     <Routes>
+        <Route path="/codex/custom-viz" element={<CodexCustomVizFeature />} />
+        <Route path="/codex/operations" element={<CodexOperationsFeature />} />
+
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/products" element={<PrivateRoute><Products /></PrivateRoute>} />
