@@ -5,7 +5,7 @@ import Layout from '../components/Layout';
 import { BarChart, LineChart, DonutChart, ChartLegend } from '../components/Charts';
 import { useNotifications } from '../context/NotificationContext';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
 const Dashboard = () => {
   const navigate = useNavigate();

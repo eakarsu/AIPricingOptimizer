@@ -1,0 +1,18 @@
+name: ci
+on: [push, pull_request]
+permissions: {contents: read}
+jobs:
+  governed-pricing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22}
+      - run: node --test backend/test/*.test.js
+      - run: node --check backend/domain/pricingPolicy.js
+      - run: node --check backend/services/providerBoundary.js
+      - run: node --check backend/routes/governedPricing.js
+      - run: node --check backend/middleware/auth.js
+      - run: node --check backend/routes/auth.js
+      - run: node --check backend/server.js
+      - run: bash -n start.sh scripts/bootstrap.sh scripts/migrate.sh scripts/seed-development.sh

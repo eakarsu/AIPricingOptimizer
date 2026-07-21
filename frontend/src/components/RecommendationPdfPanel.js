@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5100/api';
+const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
 export default function RecommendationPdfPanel() {
   const [sku, setSku] = useState('SKU-1001');

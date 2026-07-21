@@ -3,7 +3,7 @@ import axios from 'axios';
 
 const AuthContext = createContext();
 
-const API_URL = 'http://localhost:5100/api';
+const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
 // Set axios default header immediately if token exists in localStorage
 const storedToken = localStorage.getItem('token');

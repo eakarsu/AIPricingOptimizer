@@ -4,7 +4,7 @@ import Layout from '../components/Layout';
 import DataTable from '../components/DataTable';
 import { useNotifications } from '../context/NotificationContext';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
 const DemandSignals = () => {
   const [signals, setSignals] = useState([]);

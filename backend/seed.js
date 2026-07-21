@@ -2,12 +2,24 @@ require('dotenv').config({ path: '../.env' });
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 
+if (process.env.NODE_ENV === 'production' ||
+    (process.env.ALLOW_DEMO_SEED !== 'true' && process.env.SEED_ACK !== 'reset-local-pricing-database')) {
+  throw new Error('Destructive demo seed is disabled; enable it explicitly outside production');
+}
+const demoPassword = process.env.DEMO_SEED_PASSWORD || process.env.DEMO_PASSWORD;
+if (!demoPassword || demoPassword.length < 12) {
+  throw new Error('DEMO_SEED_PASSWORD or DEMO_PASSWORD must contain at least 12 characters');
+}
+const demoEmail = process.env.DEMO_EMAIL || 'admin@pricingoptimizer.com';
+const demoTenantName = process.env.TENANT_ID || 'local-pricing-demo';
+
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'pricing_optimizer',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
+  connectionString: process.env.DATABASE_URL || undefined,
+  host: process.env.DATABASE_URL ? undefined : process.env.DB_HOST,
+  port: process.env.DATABASE_URL ? undefined : process.env.DB_PORT,
+  database: process.env.DATABASE_URL ? undefined : process.env.DB_NAME,
+  user: process.env.DATABASE_URL ? undefined : process.env.DB_USER,
+  password: process.env.DATABASE_URL ? undefined : process.env.DB_PASSWORD,
 });
 
 async function createTables() {
@@ -39,9 +51,9 @@ async function createTables() {
     `DROP TABLE IF EXISTS demand_signals CASCADE`,
     `DROP TABLE IF EXISTS competitors CASCADE`,
     `DROP TABLE IF EXISTS products CASCADE`,
-    `DROP TABLE IF EXISTS users CASCADE`,
+    `DO $$ BEGIN IF to_regclass('public.users') IS NOT NULL THEN TRUNCATE TABLE users RESTART IDENTITY CASCADE; END IF; END $$`,
 
-    `CREATE TABLE users (
+    `CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       email VARCHAR(255) UNIQUE NOT NULL,
       password VARCHAR(255) NOT NULL,
@@ -433,10 +445,10 @@ async function createTables() {
 
 async function seedData() {
   // Seed Users
-  const hashedPassword = await bcrypt.hash('password123', 10);
+  const hashedPassword = await bcrypt.hash(demoPassword, 10);
 
   const users = [
-    ['admin@pricingoptimizer.com', hashedPassword, 'Admin User', 'admin'],
+    [demoEmail, hashedPassword, 'Admin User', 'admin'],
     ['john.doe@example.com', hashedPassword, 'John Doe', 'manager'],
     ['jane.smith@example.com', hashedPassword, 'Jane Smith', 'user'],
     ['mike.wilson@example.com', hashedPassword, 'Mike Wilson', 'user'],
@@ -448,6 +460,23 @@ async function seedData() {
       u
     );
   }
+  const organization = await pool.query(
+    `INSERT INTO pricing_organizations (name)
+     SELECT $1 WHERE NOT EXISTS (SELECT 1 FROM pricing_organizations WHERE name=$1)
+     RETURNING id`,
+    [demoTenantName]
+  );
+  const tenantId = organization.rows[0]?.id || (await pool.query(
+    'SELECT id FROM pricing_organizations WHERE name=$1 ORDER BY id LIMIT 1',
+    [demoTenantName]
+  )).rows[0].id;
+  const demoUser = await pool.query('SELECT id FROM users WHERE email=$1', [demoEmail]);
+  await pool.query(
+    `INSERT INTO pricing_memberships (tenant_id,user_id,role,active)
+     VALUES ($1,$2,'admin',TRUE)
+     ON CONFLICT (tenant_id,user_id) DO UPDATE SET role=EXCLUDED.role,active=TRUE`,
+    [tenantId, demoUser.rows[0].id]
+  );
   console.log('Users seeded');
 
   // Seed Products (15+ items)
