@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "$PROJECT_DIR/.env" ]];then echo "Missing required file: $PROJECT_DIR/.env" >&2;exit 1;fi
+set -a
+source "$PROJECT_DIR/.env"
+set +a
 BACKEND_PORT="${BACKEND_PORT:-${PORT:-3001}}";FRONTEND_PORT="${FRONTEND_PORT:-3000}";JWT_SECRET_VALUE="${JWT_SECRET:-}"
 ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://127.0.0.1:$FRONTEND_PORT,http://localhost:$FRONTEND_PORT}"
 REACT_APP_API_URL="${REACT_APP_API_URL:-http://127.0.0.1:$BACKEND_PORT}"

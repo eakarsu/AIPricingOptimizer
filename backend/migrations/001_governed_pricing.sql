@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS pricing_integration_failures(
 CREATE TABLE IF NOT EXISTS pricing_events(
  id BIGSERIAL PRIMARY KEY,tenant_id BIGINT NOT NULL REFERENCES pricing_organizations(id),recommendation_id BIGINT REFERENCES pricing_recommendations(id),actor_id INTEGER REFERENCES users(id),event_type TEXT NOT NULL,payload JSONB NOT NULL DEFAULT '{}'::jsonb,evidence_digest CHAR(64),occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS pricing_ai_analyses(
+ id BIGSERIAL PRIMARY KEY,tenant_id BIGINT NOT NULL REFERENCES pricing_organizations(id),actor_id INTEGER NOT NULL REFERENCES users(id),request JSONB NOT NULL,response JSONB NOT NULL,model TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE INDEX IF NOT EXISTS pricing_snapshot_sku_idx ON pricing_snapshots(tenant_id,sku,as_of);
 CREATE INDEX IF NOT EXISTS pricing_recommendation_state_idx ON pricing_recommendations(tenant_id,workflow_state,updated_at);
@@ -46,6 +49,7 @@ DROP TRIGGER IF EXISTS pricing_approvals_append_only ON pricing_approvals;CREATE
 DROP TRIGGER IF EXISTS pricing_evaluations_append_only ON pricing_experiment_evaluations;CREATE TRIGGER pricing_evaluations_append_only BEFORE UPDATE OR DELETE ON pricing_experiment_evaluations FOR EACH ROW EXECUTE FUNCTION prevent_pricing_evidence_mutation();
 DROP TRIGGER IF EXISTS pricing_assignments_append_only ON pricing_experiment_assignments;CREATE TRIGGER pricing_assignments_append_only BEFORE UPDATE OR DELETE ON pricing_experiment_assignments FOR EACH ROW EXECUTE FUNCTION prevent_pricing_evidence_mutation();
 DROP TRIGGER IF EXISTS pricing_events_append_only ON pricing_events;CREATE TRIGGER pricing_events_append_only BEFORE UPDATE OR DELETE ON pricing_events FOR EACH ROW EXECUTE FUNCTION prevent_pricing_evidence_mutation();
+DROP TRIGGER IF EXISTS pricing_ai_analyses_append_only ON pricing_ai_analyses;CREATE TRIGGER pricing_ai_analyses_append_only BEFORE UPDATE OR DELETE ON pricing_ai_analyses FOR EACH ROW EXECUTE FUNCTION prevent_pricing_evidence_mutation();
 
 CREATE OR REPLACE FUNCTION guard_pricing_recommendation_evidence() RETURNS trigger AS $$
 BEGIN

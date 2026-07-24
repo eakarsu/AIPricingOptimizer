@@ -33,5 +33,18 @@ router.post('/login', async (req, res) => {
     return res.json({ token, user });
   } catch (_error) { return res.status(500).json({ error: 'Login failed' }); }
 });
-router.get('/me', authenticate, (req, res) => res.json({ user: req.user }));
+router.get('/me', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.id,u.email,u.name,m.tenant_id AS "tenantId",m.role
+       FROM users u JOIN pricing_memberships m ON m.user_id=u.id
+       WHERE u.id=$1 AND m.tenant_id=$2 AND m.active=TRUE`,
+      [req.user.id, req.user.tenantId]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'User not found' });
+    return res.json({ user: result.rows[0] });
+  } catch (_error) {
+    return res.status(500).json({ error: 'Identity lookup failed' });
+  }
+});
 module.exports = router;

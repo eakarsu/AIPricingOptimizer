@@ -5,6 +5,36 @@ const pool = require('../db');
 const { assignExperimentUnit, authorizeTransition, digest, evaluateExperiment, recommendPrice, validateExperiment, validateSnapshot } = require('../domain/pricingPolicy');
 const { providerReadiness, requireProviders } = require('../services/providerBoundary');
 
+async function callOpenRouter(messages) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY is required');
+  const baseUrl = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.OPENROUTER_MODEL,
+      messages,
+      temperature: 0.2,
+      max_tokens: 1200,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error?.message || `OpenRouter returned HTTP ${response.status}`);
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) throw new Error('OpenRouter returned an empty response');
+  return { content, model: data.model || process.env.OPENROUTER_MODEL };
+}
+
+function parseAiJson(content) {
+  try { return JSON.parse(content); } catch (_error) {}
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) { try { return JSON.parse(fenced[1].trim()); } catch (_error) {} }
+  const object = content.match(/\{[\s\S]*\}/);
+  if (object) { try { return JSON.parse(object[0]); } catch (_error) {} }
+  return { analysis: content };
+}
+
 module.exports = function buildRouter(authenticate) {
   const router = express.Router();
   router.use(authenticate);
@@ -15,6 +45,31 @@ module.exports = function buildRouter(authenticate) {
   async function event(client, req, recommendationId, type, payload, evidenceDigest = null) { await client.query(`INSERT INTO pricing_events(tenant_id,recommendation_id,actor_id,event_type,payload,evidence_digest) VALUES($1,$2,$3,$4,$5,$6)`, [tenant(req), recommendationId || null, req.user.id, type, payload || {}, evidenceDigest]); }
 
   router.get('/providers/readiness', roles('pricing_analyst', 'pricing_approver', 'auditor', 'admin'), (_req, res) => { const result = providerReadiness(); res.status(result.ready ? 200 : 503).json(result); });
+
+  router.post('/ai/recommendation-analysis', roles('pricing_analyst', 'admin'), async (req, res) => {
+    try {
+      const input = req.body || {};
+      if (!String(input.sku || '').trim() || !Number.isInteger(input.currentPriceMinor) || !Number.isInteger(input.unitCostMinor)) {
+        return res.status(422).json({ error: 'sku, currentPriceMinor, and unitCostMinor are required' });
+      }
+      const ai = await callOpenRouter([
+        {
+          role: 'system',
+          content: 'You are a pricing decision-support analyst. You never execute a price change. Return strict JSON with summary, recommended_price_minor, rationale, guardrails, risks, and required_human_review.',
+        },
+        { role: 'user', content: `Analyze this governed pricing scenario and return JSON only: ${JSON.stringify(input)}` },
+      ]);
+      const analysis = parseAiJson(ai.content);
+      await pool.query(
+        `INSERT INTO pricing_ai_analyses(tenant_id,actor_id,request,response,model)
+         VALUES($1,$2,$3,$4,$5)`,
+        [tenant(req), req.user.id, input, analysis, ai.model]
+      );
+      return res.json({ analysis, model: ai.model, automaticExecution: false });
+    } catch (error) {
+      return fail(res, error, 'Pricing AI analysis failed');
+    }
+  });
 
   router.post('/snapshots', roles('pricing_analyst', 'admin'), async (req, res) => {
     try {
