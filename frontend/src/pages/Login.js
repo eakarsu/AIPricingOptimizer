@@ -68,7 +68,7 @@ const Login = () => {
         </form>
 
         <button type="button" className="btn btn-secondary" onClick={populateCredentials}>
-          Use Demo Credentials
+          Auto Fill Demo Credentials
         </button>
       </div>
     </div>
