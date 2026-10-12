@@ -5,6 +5,24 @@ const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const { authenticate, jwtSecret } = require('../middleware/auth');
 const router = express.Router();
+// Local development convenience. Never expose credentials from a hosted server.
+router.get('/demo-credentials', (req, res) => {
+  const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.ip);
+  if (process.env.NODE_ENV === 'production' || process.env.ENABLE_DEMO_CREDENTIAL_AUTOFILL !== 'true' || !local) {
+    return res.status(404).json({ error: 'Demo credentials are unavailable.' });
+  }
+  const pairs = [
+    ['DEMO_EMAIL', 'DEMO_PASSWORD'],
+    ['DEMO_EMAIL', 'DEMO_SEED_PASSWORD'],
+    ['SEED_ADMIN_EMAIL', 'SEED_ADMIN_PASSWORD'],
+    ['ADMIN_EMAIL', 'ADMIN_PASSWORD'],
+    ['DEFAULT_EMAIL', 'DEFAULT_PASSWORD'],
+  ];
+  const pair = pairs.find(([email, password]) => process.env[email] && process.env[password]);
+  if (!pair) return res.status(404).json({ error: 'Demo credentials are unavailable.' });
+  res.set('Cache-Control', 'no-store');
+  return res.json({ email: process.env[pair[0]], password: process.env[pair[1]] });
+});
 router.post('/login', async (req, res) => {
   try {
     const { email, password, tenantId, tenant, tenantSlug } = req.body || {};

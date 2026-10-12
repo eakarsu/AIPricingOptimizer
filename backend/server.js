@@ -17,6 +17,14 @@ app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders:
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'governed-pricing-optimizer' }));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/governed-pricing', require('./routes/governedPricing')(authenticate));
+
+// Advisory AI reports only; native execution and approval routes stay unchanged.
+const aiWorkspaceSupport = require("./aiWorkspaceAdapters.cjs");
+const aiWorkspaceDatabase = require("./db.js");
+app.use('/api/report-workspace', require("./aiWorkspace.cjs").createAIWorkspaceRouter({
+  pool: aiWorkspaceDatabase, authenticateToken: require("./middleware/auth.js").authenticate,
+  aiRateLimiter: aiWorkspaceSupport.createWorkspaceLimiter(), features: require("./aiWorkspaceFeatures.json"),
+}));
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 const port = Number(process.env.PORT || 3001);
 app.listen(port, () => console.log(`Governed pricing API listening on ${port}`));

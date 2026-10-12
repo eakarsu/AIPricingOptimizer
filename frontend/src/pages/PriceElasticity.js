@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Layout from '../components/Layout';
+import AIReport from '../components/AIReport';
+import ProductSelectionPresets from '../components/ProductSelectionPresets';
 
 const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
@@ -236,6 +238,7 @@ const PriceElasticity = () => {
               <option key={p.id} value={p.id}>{p.name} - ${p.current_price}</option>
             ))}
           </select>
+          <ProductSelectionPresets products={products} onChange={setSelectedProduct} disabled={analyzing} />
           <button
             className="btn btn-primary btn-small"
             onClick={handleAnalyze}
@@ -539,9 +542,7 @@ const PriceElasticity = () => {
                             <p style={{ color: '#888', fontSize: '13px', marginBottom: '12px' }}>
                               Response could not be fully parsed. Please try again.
                             </p>
-                            <div style={{ background: '#1a1a2e', padding: '16px', borderRadius: '8px', fontSize: '13px' }}>
-                              {insights.raw}
-                            </div>
+                            <AIReport response={{ result: insights.raw }} title="Price elasticity analysis" />
                           </div>
                         );
                       }

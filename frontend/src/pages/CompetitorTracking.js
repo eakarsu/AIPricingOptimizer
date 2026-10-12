@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Layout from '../components/Layout';
+import AIReport from '../components/AIReport';
 
 const API_URL = (process.env.REACT_APP_API_URL || 'http://localhost:3001') + '/api';
 
@@ -414,9 +415,7 @@ const CompetitorTracking = () => {
                       );
                     }
                     return (
-                      <div className="ai-raw-output">
-                        <pre>{typeof aiAnalysis === 'string' ? aiAnalysis : JSON.stringify(aiAnalysis, null, 2)}</pre>
-                      </div>
+                      <AIReport response={aiAnalysis} title="Competitor analysis" />
                     );
                   })()}
                 </div>

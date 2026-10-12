@@ -1,3 +1,4 @@
+import AIReportLibrary from "./AIReportLibrary";
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -92,7 +93,7 @@ const Layout = ({ children }) => {
             Logout
           </button>
         </div>
-      </aside>
+      <AIReportLibrary /></aside>
 
       <main className="main-content">
         <div className="top-bar" style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '20px' }}>

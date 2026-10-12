@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Layout from '../components/Layout';
+import AIReport from '../components/AIReport';
 import DataTable from '../components/DataTable';
 import { useNotifications } from '../context/NotificationContext';
 
@@ -348,7 +349,7 @@ const DemandSignals = () => {
           {aiAnalysis && (
             <div className="ai-analysis">
               <h3>AI Demand Analysis</h3>
-              <div className="content">{aiAnalysis}</div>
+              <AIReport response={aiAnalysis} title="Demand signal analysis" />
             </div>
           )}
         </div>

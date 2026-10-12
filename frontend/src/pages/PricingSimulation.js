@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
 import { useAuth } from '../context/AuthContext';
+import AIReport from '../components/AIReport';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3001';
 
@@ -13,6 +14,22 @@ const PricingSimulation = () => {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const sampleProduct = products.find(p => String(p.id) === selectedProduct) || products[0];
+  const samplePrice = Number(sampleProduct?.current_price);
+  const canFillExamples = sampleProduct && Number.isFinite(samplePrice) && samplePrice > 0;
+  const examples = [
+    { label: 'Conservative change', factors: [0.98, 1, 1.03], context: 'Stable demand, current stock levels, and no confirmed competitor promotion. Compare modest price changes before approval.' },
+    { label: 'Seasonal promotion', factors: [0.85, 0.9, 0.95], context: 'Short seasonal promotion with uncertain demand lift. Compare revenue and margin, and flag missing inventory evidence.' },
+    { label: 'Premium positioning', factors: [1.05, 1.1, 1.15], context: 'Test a premium price range against possible conversion loss. Identify competitor and customer evidence needed before acting.' },
+  ];
+  const fillExample = (example) => {
+    if (!canFillExamples) return;
+    setSelectedProduct(String(sampleProduct.id));
+    setScenarios(example.factors.map(factor => ({ price: (samplePrice * factor).toFixed(2) })));
+    setMarketConditions(example.context);
+    setResult(null);
+    setError('');
+  };
 
   useEffect(() => {
     fetch(`${API_BASE}/api/products`, { headers: { Authorization: `Bearer ${token}` } })
@@ -47,6 +64,11 @@ const PricingSimulation = () => {
 
         <div className="card" style={{ marginBottom: '1.5rem' }}>
           <h3>Configure Simulation</h3>
+          <div className="ai-preset-bar">
+            <div><strong>Fill an example</strong><p>Each example fills the product, all three prices, and market context. Review before running.</p></div>
+            <div className="ai-actions">{examples.map(example => <button key={example.label} type="button" className="btn btn-secondary" disabled={loading || !canFillExamples} onClick={() => fillExample(example)}>{example.label}</button>)}</div>
+          </div>
+          {!canFillExamples && <p role="status">Load a real product with a positive current price to use these examples.</p>}
           <div className="form-group">
             <label>Select Product</label>
             <select className="form-select" value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)}>
@@ -125,7 +147,7 @@ const PricingSimulation = () => {
             {!result.simulation && result.aiResponse && (
               <div className="card">
                 <h4>AI Analysis</h4>
-                <pre style={{ whiteSpace: 'pre-wrap', fontSize: '0.9rem' }}>{result.aiResponse}</pre>
+                <AIReport response={result.aiResponse} title="Price simulation analysis" />
               </div>
             )}
           </div>
