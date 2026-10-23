@@ -309,8 +309,8 @@ const PriceElasticity = () => {
 
       {/* Detail Modal */}
       {showDetailModal && selectedItem && (
-        <div className="modal-overlay" onClick={() => setShowDetailModal(false)}>
-          <div className="modal" style={{ maxWidth: '800px' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={() => { setShowDetailModal(false); setSelectedItem(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: '800px' }} onClick={(e) => e.stopPropagation()}>
             <h2>Price Elasticity Analysis</h2>
 
             <div className="elasticity-visual">
@@ -564,9 +564,9 @@ const PriceElasticity = () => {
             </div>
 
             <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowDetailModal(false)}>Close</button>
               <button className="btn btn-primary" onClick={() => handleEdit(selectedItem)}>Edit</button>
               <button className="btn btn-danger" onClick={() => handleDelete(selectedItem.id)}>Delete</button>
+              <button className="btn btn-secondary btn-cancel" onClick={() => { setShowDetailModal(false); setSelectedItem(null); }}>Cancel</button>
             </div>
           </div>
         </div>

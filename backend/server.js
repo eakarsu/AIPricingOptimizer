@@ -17,6 +17,7 @@ app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders:
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'governed-pricing-optimizer' }));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/governed-pricing', require('./routes/governedPricing')(authenticate));
+app.use('/api/feature-pack', require('./routes/featurePack')(authenticate));
 
 // Advisory AI reports only; native execution and approval routes stay unchanged.
 const aiWorkspaceSupport = require("./aiWorkspaceAdapters.cjs");
